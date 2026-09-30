@@ -1,6 +1,6 @@
 # index_cartoon_stylized.html — Clash Village: các kỹ thuật 3D
 
-Một file HTML duy nhất (`index_cartoon_stylized.html`, ~2442 dòng), three.js **r186** nạp bằng ES module từ jsDelivr, không build.
+Một file HTML duy nhất (`index_cartoon_stylized.html`, ~2444 dòng), three.js **r186** nạp bằng ES module từ jsDelivr, không build.
 Làng kiểu Clash of Clans (nhà cửa, cây cối, đường đất, hồ nước, tường, phòng thủ, quân lính) được sinh thủ tục hoàn toàn lúc khởi động; ngoài three.js, chỉ font "Lilita One" lấy từ Google Fonts (có font hệ thống dự phòng).
 
 **Tổng: 41 kỹ thuật 3D, chia 7 nhóm.** Số này là số dòng trong các bảng dưới (cùng cách đếm với `index.md`); tách/gộp khác đi thì ra số khác. Cột "Vị trí" là số dòng trong `index_cartoon_stylized.html`; mỗi mục lớn có banner `// ==== TÊN ====` để grep.
@@ -39,10 +39,10 @@ Làng kiểu Clash of Clans (nhà cửa, cây cối, đường đất, hồ nư�
 | 18 | Gradient đỉnh bake sẵn | Mỗi primitive được nhân sáng dần từ chân (0.84) lên đỉnh (1.06); tán cây dùng dải rộng hơn (0.66–1.14). Cho chiều sâu và giả AO mà không tốn pass hay texture | 492 |
 | 19 | Đá icosphere nhiễu đỉnh + AO khe nứt | `rockGeo`: `IcosahedronGeometry` (detail 2–3) đẩy đỉnh bằng nhiễu lượng giác chỉ phụ thuộc vị trí (đỉnh trùng của mesh non-indexed vẫn khít), đáy cắt phẳng; độ lõm được ghi vào thuộc tính `shade` để khe nứt tối hơn, `Kit.add` đọc rồi bỏ thuộc tính này trước khi merge | 526 |
 | 20 | Thư viện 12 công trình | Town Hall (tháp đồng hồ, 4 tháp mái xanh), Gold Mine, Elixir Collector, 2 kho, Barracks, Army Camp, Cannon, Archer Tower, Builder's Hut, Wall, Cottage (3 kiểu: cottage, tudor, chuồng gỗ); nâng cấp thêm chi tiết vàng | 932 … 1327 |
-| 21 | Instancing thiên nhiên + LOD cây gần / xa | Cây tròn, thông, bụi, đá: mỗi loại 1 `InstancedMesh`, màu lệch nhẹ theo từng instance (`setColorAt`). Cây tròn tách 2 bộ: bản chi tiết (~1.000–1.200 tam giác, gốc xoè, cành, 6 tán) cho cây trong làng và cây cách tâm < `HI_D`, bản rẻ (~390) cho rừng xa; thông 4 tầng nón | 1426 |
-| 22 | Gió lay bằng shader | `onBeforeCompile` chèn dịch chuyển đỉnh theo `uTime` và vị trí instance, cùng công thức với hull | 1390 |
+| 21 | Instancing thiên nhiên + LOD cây gần / xa | Cây tròn, thông, bụi, đá: mỗi loại 1 `InstancedMesh`, màu lệch nhẹ theo từng instance (`setColorAt`). Cây tròn tách 2 bộ: bản chi tiết (~1.000–1.200 tam giác, gốc xoè, cành, 6 tán) cho cây trong làng và cây cách tâm < `HI_D`, bản rẻ (~390) cho rừng xa; thông 4 tầng nón | 1428 |
+| 22 | Gió lay bằng shader | `onBeforeCompile` chèn dịch chuyển đỉnh theo `uTime` và vị trí instance, cùng công thức với hull | 1392 |
 | 23 | Tường tự nối | Mọi mảnh tường gộp thành 1 mesh, dựng lại khi thay đổi. `wallPiece` dựng từng ô: tháp tròn mái ngói ở góc / đầu mút, trụ vuông có răng cưa ở đoạn thẳng, thành tường nối sang ô liền kề; cổng (xà + cờ) tự hình thành nơi đường cắt vòng tường. Ghost đặt tường và ảnh Shop dùng chung `wallPiece` nên luôn giống hàng thật | 1061 |
-| 24 | Nhân vật gắn khớp bằng pivot | Thân, hai chân, tay cầm vũ khí là mesh riêng; chu kỳ đi / đánh / đứng chỉ là xoay pivot | 1354, 1382 |
+| 24 | Nhân vật gắn khớp bằng pivot | Thân, hai chân, hai tay (một tay cầm vũ khí, tay kia vung ngược pha) là mesh riêng; chu kỳ đi / đánh / đứng chỉ là xoay pivot | 1354, 1383 |
 
 ## 4. Địa hình và nước (4)
 
@@ -51,35 +51,35 @@ Làng kiểu Clash of Clans (nhà cửa, cây cối, đường đất, hồ nư�
 | 25 | Mặt đất vẽ lên canvas | 2304² px (48 px/ô): ô cỏ bàn cờ có nhiễu, ~2500 chùm cỏ ngắn, hoa, quảng trường lát đá bo góc 3×3 mỗi ô, vòng khảm vàng; texture sRGB, anisotropy tối đa | 630 |
 | 26 | Đường đất bằng spline | Catmull-Rom → nét vẽ nhiều lớp (viền cỏ, viền đất, lõi, vệt bánh xe) và ~4400 viên sỏi nhỏ có bóng tiếp xúc; cùng spline đó được rasterize thành mask ô để chặn đặt công trình | 544, 582, 603 |
 | 27 | Shader nước ao | `ShaderMaterial`: độ sâu chia 3 nấc theo khoảng cách tới bờ (hàm bán kính theo góc dùng chung với JS), sọc sóng chạy bằng value noise, vòng bọt méo theo thời gian | 733 |
-| 28 | Bờ ao và đời sống | `ExtrudeGeometry` từ `Shape` có lỗ tạo bờ cát; hoa súng, lau sậy, cầu tàu, thuyền, 3 con vịt bơi | 761, 1473 |
+| 28 | Bờ ao và đời sống | `ExtrudeGeometry` từ `Shape` có lỗ tạo bờ cát; hoa súng, lau sậy, cầu tàu, thuyền, 3 con vịt bơi | 761, 1475 |
 
 ## 5. Chuyển động và hạt (6)
 
 | # | Kỹ thuật | Mô tả | Vị trí |
 | - | -------- | ----- | ------ |
 | 29 | Animation đạo cụ | Cờ, bánh xe, lửa trại nhấp nháy, giọt elixir nhấp nhô, nòng pháo quay và giật, cung thủ ngắm | 1292, 1194, 1234 |
-| 30 | Khói ống khói | Một `InstancedMesh` cầu 14×10, 3 cụm mỗi ống khói, kích thước theo sin, màu chuyển từ trắng sang xanh nhạt khi bay lên (`setColorAt`) | 1525 |
-| 31 | Bể hạt FX | 220 instance có màu riêng: bụi khi xây, lấp lánh khi thu tài nguyên, bột khi trúng đạn, "poof" | 1710 |
-| 32 | Nảy khi chọn và hiện công trình | Squash & stretch tắt dần khi chọn, `easeOutBack` khi xây hoặc nâng cấp xong | 2328 |
-| 33 | Dân làng đi trên đường | 7 nhân vật đi qua lại theo spline đường, quay mặt theo hướng đi | 1538 |
-| 34 | Đạn | Đạn pháo bay parabol và nổ lan (sát thương vùng), mũi tên tự dò theo mục tiêu | 2224, 2245 |
+| 30 | Khói ống khói | Một `InstancedMesh` cầu 14×10, 3 cụm mỗi ống khói, kích thước theo sin, màu chuyển từ trắng sang xanh nhạt khi bay lên (`setColorAt`) | 1527 |
+| 31 | Bể hạt FX | 220 instance có màu riêng: bụi khi xây, lấp lánh khi thu tài nguyên, bột khi trúng đạn, "poof" | 1712 |
+| 32 | Nảy khi chọn và hiện công trình | Squash & stretch tắt dần khi chọn, `easeOutBack` khi xây hoặc nâng cấp xong | 2330 |
+| 33 | Dân làng đi trên đường | 7 nhân vật đi qua lại theo spline đường, quay mặt theo hướng đi | 1540 |
+| 34 | Đạn | Đạn pháo bay parabol và nổ lan (sát thương vùng), mũi tên tự dò theo mục tiêu | 2226, 2247 |
 
 ## 6. Camera và tương tác (6)
 
 | # | Kỹ thuật | Mô tả | Vị trí |
 | - | -------- | ----- | ------ |
-| 35 | Camera rig | Pan bằng "nắm điểm trên mặt đất" (giao tia–mặt phẳng nên điểm dưới con trỏ đứng yên), zoom giảm chấn (bánh xe / chụm 2 ngón), xoay yaw; dùng Pointer Events nên chạy cả cảm ứng | 1573, 1590 |
-| 36 | Chọn bằng raycast | Raycast vào nhóm công trình; tường tra theo ô; điểm rơi trên mặt đất là phương án dự phòng | 1971 |
-| 37 | Lớp phủ lưới đặt | Lưới ô (texture lặp), mask ô bị cấm (`DataTexture` N×N, Nearest), ô footprint xanh / đỏ | 1900, 1909, 1899 |
-| 38 | Kéo thả bám ô | Giữ offset từ con trỏ tới tâm công trình, làm tròn về ô, nâng lên khi kéo; đặt mới có ghost + nút ✔ / ✖ | 2000, 2008 |
-| 39 | Tìm đường BFS | Lưới 40×40, 8 hướng không cắt góc; đơn vị nhảy qua tường (vòng cung theo khoảng cách tới ô tường) | 1777, 1797 |
-| 40 | Nhãn DOM theo toạ độ thế giới | Bong bóng thu tài nguyên, đồng hồ xây: `Vector3.project` mỗi frame; icon bay về HUD bằng Web Animations | 1735, 1755 |
+| 35 | Camera rig | Pan bằng "nắm điểm trên mặt đất" (giao tia–mặt phẳng nên điểm dưới con trỏ đứng yên), zoom giảm chấn (bánh xe / chụm 2 ngón), xoay yaw; dùng Pointer Events nên chạy cả cảm ứng | 1575, 1592 |
+| 36 | Chọn bằng raycast | Raycast vào nhóm công trình; tường tra theo ô; điểm rơi trên mặt đất là phương án dự phòng | 1973 |
+| 37 | Lớp phủ lưới đặt | Lưới ô (texture lặp), mask ô bị cấm (`DataTexture` N×N, Nearest), ô footprint xanh / đỏ | 1902, 1911, 1901 |
+| 38 | Kéo thả bám ô | Giữ offset từ con trỏ tới tâm công trình, làm tròn về ô, nâng lên khi kéo; đặt mới có ghost + nút ✔ / ✖ | 2002, 2010 |
+| 39 | Tìm đường BFS | Lưới 40×40, 8 hướng không cắt góc; đơn vị nhảy qua tường (vòng cung theo khoảng cách tới ô tường) | 1779, 1799 |
+| 40 | Nhãn DOM theo toạ độ thế giới | Bong bóng thu tài nguyên, đồng hồ xây: `Vector3.project` mỗi frame; icon bay về HUD bằng Web Animations | 1737, 1757 |
 
 ## 7. Render ra texture (1)
 
 | # | Kỹ thuật | Mô tả | Vị trí |
 | - | -------- | ----- | ------ |
-| 41 | Ảnh 3D trong Shop | Mỗi công trình dựng bằng chính builder của nó, render vào `WebGLRenderTarget` 192² (MSAA 4x, `colorSpace: sRGB`, nền trong suốt), `readRenderTargetPixels` → canvas → PNG; độ dày viền được hiệu chỉnh cho kích thước target | 2090 |
+| 41 | Ảnh 3D trong Shop | Mỗi công trình dựng bằng chính builder của nó, render vào `WebGLRenderTarget` 192² (MSAA 4x, `colorSpace: sRGB`, nền trong suốt), `readRenderTargetPixels` → canvas → PNG; độ dày viền được hiệu chỉnh cho kích thước target | 2092 |
 
 ## Thứ tự mỗi frame
 
@@ -94,10 +94,10 @@ Không có EffectComposer: viền, bóng, sương mù đều nằm trong một l
 
 ## Ngoài 41 kỹ thuật trên (không tính vào tổng)
 
-- Kinh tế: mỏ vàng / máy elixir tích trữ theo thời gian, kho quyết định trần chứa, thu bằng bong bóng; nâng cấp tốn tài nguyên, có giàn giáo và đồng hồ, "Finish now" bằng gem: 1669-1704, 1835-1894.
-- Luyện quân từ Barracks (đi bộ theo BFS về trại) và **Raid**: goblin chạy tới kho / mỏ, ăn cắp rồi tháo chạy; pháo, tháp cung và lính thả bằng cách chạm đất chặn chúng: 1817-1834, 2157-2325.
+- Kinh tế: mỏ vàng / máy elixir tích trữ theo thời gian, kho quyết định trần chứa, thu bằng bong bóng; nâng cấp tốn tài nguyên, có giàn giáo và đồng hồ, "Finish now" bằng gem: 1671-1706, 1837-1896.
+- Luyện quân từ Barracks (đi bộ theo BFS về trại) và **Raid**: goblin chạy tới kho / mỏ, ăn cắp rồi tháo chạy; pháo, tháp cung và lính thả bằng cách chạm đất chặn chúng: 1819-1836, 2159-2327.
 - HUD viết bằng HTML/CSS với transitions-dev: number pop-in cho bộ đếm tài nguyên, modal cho Shop, panel reveal cho thanh hành động; có `prefers-reduced-motion`.
-- Khung báo lỗi, màn hình loading, hook `window.__app` (`frames`, `pose`, `info`, `perf`, `select`, `beginPlace`, `startRaid`…): 2376-2398.
+- Khung báo lỗi, màn hình loading, hook `window.__app` (`frames`, `pose`, `info`, `perf`, `select`, `beginPlace`, `startRaid`…): 2378-2400.
 
 ## Điều khiển và tham số
 
