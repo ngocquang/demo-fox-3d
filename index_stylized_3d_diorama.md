@@ -130,9 +130,9 @@ composer    RenderPass (MSAA 4x, HDR) → UnrealBloom → blur mép + grade + vi
 
 Tham số URL: `?scale=0.75` (hệ số độ phân giải) `?seed=<n>` (đổi cách rải cây, cỏ, bia) `?orbit=0` (tắt trôi camera, hữu ích khi chụp ảnh so sánh) `?debug` (FPS, số draw call, số lá).
 
-## So với index_cartoon_stylized.html
+## So với index_cartoon_stylized_3d.html
 
-| | index_cartoon_stylized.html (Clash Village) | index_stylized_3d_diorama.html (Fireside Graveyard) |
+| | index_cartoon_stylized_3d.html (Clash Village) | index_stylized_3d_diorama.html (Fireside Graveyard) |
 | - | - | - |
 | Phong cách | Hoạt hình sáng: toon 3 nấc, viền, màu bão hoà | Diorama "creepy-cute" tối: bề mặt smooth vát cạnh, tương phản đèn ấm / nền tối trung tính |
 | Pipeline | Một lần render, MSAA gốc, viền bằng hull | `EffectComposer` HDR: bloom, blur mép, grade, ACES, làm nét CAS |

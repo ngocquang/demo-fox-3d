@@ -1,9 +1,9 @@
-# index_cartoon_stylized.html — Clash Village: các kỹ thuật 3D
+# index_cartoon_stylized_3d.html — Clash Village: các kỹ thuật 3D
 
-Một file HTML duy nhất (`index_cartoon_stylized.html`, ~2444 dòng), three.js **r186** nạp bằng ES module từ jsDelivr, không build.
+Một file HTML duy nhất (`index_cartoon_stylized_3d.html`, ~2444 dòng), three.js **r186** nạp bằng ES module từ jsDelivr, không build.
 Làng kiểu Clash of Clans (nhà cửa, cây cối, đường đất, hồ nước, tường, phòng thủ, quân lính) được sinh thủ tục hoàn toàn lúc khởi động; ngoài three.js, chỉ font "Lilita One" lấy từ Google Fonts (có font hệ thống dự phòng).
 
-**Tổng: 41 kỹ thuật 3D, chia 7 nhóm.** Số này là số dòng trong các bảng dưới (cùng cách đếm với `index.md`); tách/gộp khác đi thì ra số khác. Cột "Vị trí" là số dòng trong `index_cartoon_stylized.html`; mỗi mục lớn có banner `// ==== TÊN ====` để grep.
+**Tổng: 41 kỹ thuật 3D, chia 7 nhóm.** Số này là số dòng trong các bảng dưới (cùng cách đếm với `index.md`); tách/gộp khác đi thì ra số khác. Cột "Vị trí" là số dòng trong `index_cartoon_stylized_3d.html`; mỗi mục lớn có banner `// ==== TÊN ====` để grep.
 
 ## 1. Render và ánh sáng (8)
 
@@ -116,7 +116,7 @@ Tham số URL: `?shadow=2048` `?scale=0.75` `?seed=<n>` `?debug` (FPS, số draw
 
 ## So với index.html
 
-| | index.html (Forest Pond) | index_cartoon_stylized.html (Clash Village) |
+| | index.html (Forest Pond) | index_cartoon_stylized_3d.html (Clash Village) |
 | - | - | - |
 | Phong cách | Ảnh thực: PBR, HDR, ACES | Hoạt hình: toon 5 nấc, viền, rim + specular, màu bão hoà |
 | Pipeline | EffectComposer nhiều pass (GTAO, volumetric, bloom, DoF, SMAA, grade) | Một lần render, MSAA gốc, viền bằng hull |
