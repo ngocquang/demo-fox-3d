@@ -1,0 +1,1257 @@
+<!DOCTYPE html>
+<!--
+================================================================================
+  MILL POND — a small explorable three.js water world (r186, single file, no build)
+================================================================================
+  Walk the banks of a woodland pond, take the rowing boat out from the jetty and fish.
+  Everything is generated procedurally at startup; only three.js (jsDelivr) and the
+  "Fraunces" web font come from the network (the font has a system fallback). Sound is
+  synthesised with Web Audio, so there are no audio files either.
+
+  TECHNIQUES (follow the section banners "// ==== ... ====" below)
+  - World: one seeded heightfield (fbm + an irregular radial pond basin + rim hills + a
+    carved wheel pit) baked into a Float32Array grid; the terrain mesh, the walker's Y,
+    the boat's "is there water here?" test, the minimap and the water shader's depth
+    texture all read that same grid, so they can never disagree.
+  - Water: a flat plane with a custom ShaderMaterial. Waves are a normal perturbation in
+    the fragment shader (5 summed directional sines + 2 scrolling value-noise layers),
+    so there is no vertex displacement and no seam at the shoreline. Shore depth comes
+    from the heightfield uploaded as an R8 DataTexture (no depth pre-pass): it drives the
+    shallow/deep tint, shallow caustic shimmer, a noisy foam line and the alpha fade at
+    the waterline. Schlick fresnel against the same sky gradient as the dome, a tight sun
+    specular, manual linear fog. Up to 16 expanding ripple rings (boat wake, mill wheel,
+    bobber, wading) are passed in as a uniform vec4 array.
+  - Look: gradient sky dome (also baked to an environment map with PMREMGenerator),
+    hemisphere + sun light, PCF shadow map (PCFSoft was removed in r186), ACES tone
+    mapping, fog, CSS vignette.
+  - Nature: instanced trees (two crown palettes; a birch grove), reeds, rocks and lily
+    pads; wind sway injected into MeshStandardMaterial with onBeforeCompile, phased by
+    each instance's position.
+  - Props: a watermill with a turning wheel, a plank jetty, a rowing boat with a motor.
+  - Keeper: pivot-rigged figure; camera-relative walking with wall sliding, wading in
+    shallows, standing on the jetty, sitting in the boat (re-parented to the hull).
+  - Boat: throttle / reverse / brake with exponential drag, speed-scaled rudder, bob and
+    lean, collision against shallow water, the jetty and the mill; disembark searches a
+    ring of candidate landing points.
+  - Fishing: cast arc, sagging line (16-point polyline), random bite with a reaction
+    window, catch toast.
+  - Camera: damped follow (right-drag to orbit, wheel to zoom, auto-aligns behind the
+    boat) ⇄ Explore (OrbitControls that ride along with the keeper); press-and-hold to
+    walk / steer towards a point found by marching the ray over the heightfield.
+  - UI: canvas minimap baked once from the heightfield, compass, place names by region,
+    help panel, detail toggle (pixel ratio, shadow size, water noise), toasts.
+  - Sound: Web Audio — filtered noise for water, scheduled oscillator chirps for birds,
+    a sawtooth motor whose gain follows the throttle, noise-burst splashes.
+  URL params: ?scale=0.75 · ?seed=<n> · ?debug (FPS) · ?test (no loop; drive via window.__app)
+================================================================================
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Mill Pond</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,300;9..144,500&display=swap" rel="stylesheet">
+<style>
+  :root { --ink: #f2eddb; --ink-dim: rgba(242,237,219,.68); --panel: rgba(18,40,37,.74); --line: rgba(242,237,219,.16); --accent: #e8c88a; }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #13302c; color: var(--ink);
+    font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; user-select: none; -webkit-user-select: none; }
+  #world { position: fixed; inset: 0; width: 100%; height: 100%; display: block; outline: none; touch-action: none; }
+  .vignette { position: fixed; inset: 0; pointer-events: none; background: radial-gradient(ellipse at center, transparent 55%, rgba(6,18,16,.5) 100%); }
+  button { font: inherit; color: inherit; cursor: pointer; }
+  kbd { display: inline-block; min-width: 1.5em; padding: 1px 5px; border: 1px solid var(--line); border-radius: 5px; font: 600 11px/1.5 ui-monospace, monospace; text-align: center; background: rgba(255,255,255,.06); }
+
+  .serif { font-family: Fraunces, Georgia, serif; }
+  .fade { transition: opacity .5s ease, transform .5s ease, visibility 0s linear 0s; }
+  .hidden-ui { opacity: 0; visibility: hidden; pointer-events: none; transition: opacity .5s ease, transform .5s ease, visibility 0s linear .5s; }
+
+  .intro { position: fixed; left: max(16px, 6vw); bottom: max(40px, 11vh); max-width: 460px; }
+  .intro .kicker { letter-spacing: .24em; font-size: 11px; color: var(--accent); }
+  .intro h1 { font-family: Fraunces, Georgia, serif; font-weight: 300; font-size: clamp(42px, 8vw, 78px); line-height: .98; margin: .25em 0 .3em; }
+  .intro p { color: var(--ink-dim); font-size: 16px; margin: 0 0 1.6em; }
+  .intro.hidden-ui { transform: translateY(14px); }
+  .start { display: inline-flex; gap: 10px; align-items: center; padding: 12px 22px; border-radius: 999px; border: 1px solid var(--accent);
+    background: rgba(232,200,138,.14); font-size: 15px; transition: background .2s, transform .2s; }
+  .start:hover:not(:disabled) { background: rgba(232,200,138,.3); transform: translateY(-1px); }
+  .start:disabled { opacity: .5; cursor: progress; }
+  .status { margin-top: 12px; font-size: 12px; color: var(--ink-dim); }
+
+  .topbar { position: fixed; top: 12px; left: 16px; right: 16px; display: flex; justify-content: space-between; align-items: center; gap: 10px; pointer-events: none; }
+  .brand { font-family: Fraunces, Georgia, serif; letter-spacing: .22em; font-size: 13px; text-shadow: 0 1px 6px rgba(0,0,0,.4); }
+  .tools { display: flex; gap: 2px; padding: 4px; pointer-events: auto; background: var(--panel); border: 1px solid var(--line); border-radius: 999px; backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px); flex-wrap: wrap; justify-content: flex-end; }
+  .tools button { background: none; border: 0; padding: 7px 12px; border-radius: 999px; font-size: 13px; transition: background .2s; }
+  .tools button:hover, .tools button[aria-pressed="true"], .tools button[aria-expanded="true"] { background: rgba(242,237,219,.12); }
+
+  .panel { position: fixed; top: 64px; right: 16px; width: min(380px, calc(100vw - 32px)); padding: 14px 16px 16px; box-sizing: border-box;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 16px; backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); }
+  .panel.hidden-ui { transform: translateY(-8px); }
+  .panel h2 { margin: 0 0 10px; font: 500 11px/1 system-ui, sans-serif; letter-spacing: .2em; color: var(--accent); display: flex; justify-content: space-between; align-items: center; }
+  .panel h2 button { background: none; border: 0; font-size: 18px; line-height: 1; padding: 0 4px; }
+  #minimap { width: 100%; aspect-ratio: 1; display: block; border-radius: 10px; }
+  .text-button { background: none; border: 0; padding: 8px 0 0; color: var(--accent); }
+  .help dl { margin: 0; display: grid; grid-template-columns: auto 1fr; gap: 6px 14px; align-items: center; }
+  .help dt { white-space: nowrap; } .help dd { margin: 0; color: var(--ink-dim); }
+  .help p { color: var(--ink-dim); margin: 12px 0 0; }
+
+  .hud { position: fixed; left: 16px; bottom: 18px; display: flex; gap: 12px; align-items: center; pointer-events: none; }
+  .hud .line { width: 28px; height: 1px; background: var(--accent); }
+  #place-name { font-family: Fraunces, Georgia, serif; font-size: 18px; letter-spacing: .06em; display: block; }
+  #place-caption { color: var(--ink-dim); font-size: 12.5px; }
+  #place { transition: opacity .4s ease; }
+
+  .actions { position: fixed; left: 50%; bottom: 22px; transform: translateX(-50%); display: flex; gap: 8px; }
+  .act { display: inline-flex; gap: 8px; align-items: center; padding: 9px 14px; border-radius: 999px; border: 1px solid var(--line);
+    background: var(--panel); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px); white-space: nowrap; transition: opacity .25s, transform .25s, visibility 0s linear 0s; }
+  .act.hidden-ui { transform: translateY(8px); }
+  .act.urgent { border-color: var(--accent); background: rgba(232,200,138,.28); }
+
+  .compass { position: fixed; right: 18px; bottom: 18px; width: 52px; height: 52px; border-radius: 50%; border: 1px solid var(--line); background: var(--panel); display: grid; place-items: center; pointer-events: none; }
+  .compass span { position: absolute; top: 2px; font-size: 9px; letter-spacing: .1em; color: var(--accent); }
+  #needle { width: 34px; height: 34px; }
+
+  .toast { position: fixed; left: 50%; top: 72px; transform: translate(-50%, -6px); padding: 9px 16px; border-radius: 999px; background: var(--panel); border: 1px solid var(--line); max-width: calc(100vw - 32px); text-align: center; }
+  .toast.show { transform: translate(-50%, 0); }
+
+  .error { position: fixed; inset: 0; display: grid; place-content: center; text-align: center; padding: 24px; background: #13302c; z-index: 10; }
+  .error[hidden] { display: none; }
+  #fps { position: fixed; left: 16px; top: 52px; font: 12px ui-monospace, monospace; color: var(--ink-dim); }
+
+  @media (max-width: 640px) {
+    .tools button { padding: 6px 9px; font-size: 12px; }
+    .hud { bottom: 76px; }
+    .compass { bottom: 76px; }
+  }
+</style>
+</head>
+<body>
+<canvas id="world" tabindex="0" aria-label="Mill pond. W A S D or arrow keys to walk; E to board or leave the boat; F to fish; V to switch camera."></canvas>
+<div class="vignette" aria-hidden="true"></div>
+
+<section id="intro" class="intro fade" aria-labelledby="intro-title">
+  <div class="kicker">A SMALL WATER WORLD</div>
+  <h1 id="intro-title">Mill Pond</h1>
+  <p>A turning wheel, a little jetty and a boat with a sputtering motor. Wander as long as you like.</p>
+  <button id="start" class="start" disabled>Loading…</button>
+  <div id="status" class="status" role="status">Building the pond</div>
+</section>
+
+<header id="topbar" class="topbar hidden-ui">
+  <div class="brand">MILL POND</div>
+  <nav class="tools" aria-label="Settings">
+    <button id="view-btn" aria-keyshortcuts="V" title="Switch camera (V)">View: Follow</button>
+    <button id="sound-btn" aria-pressed="false">Sound off</button>
+    <button id="map-btn" aria-expanded="false" aria-controls="map-panel" aria-keyshortcuts="M">Map</button>
+    <button id="help-btn" aria-expanded="false" aria-controls="help-panel" aria-label="Controls">?</button>
+  </nav>
+</header>
+
+<aside id="map-panel" class="panel hidden-ui" aria-label="Map">
+  <h2>MAP <button data-close="map" aria-label="Close map">×</button></h2>
+  <canvas id="minimap" width="360" height="360" aria-label="Map of the pond with your position"></canvas>
+  <button id="return-btn" class="text-button">Back to the jetty →</button>
+</aside>
+
+<aside id="help-panel" class="panel help hidden-ui" aria-label="Controls">
+  <h2>CONTROLS <button data-close="help" aria-label="Close controls">×</button></h2>
+  <dl>
+    <dt><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> / arrows</dt><dd>Walk (relative to the camera) · in the boat: throttle, rudder, reverse</dd>
+    <dt><kbd>Shift</kbd></dt><dd>Walk faster</dd>
+    <dt><kbd>Space</kbd></dt><dd>Brake the boat</dd>
+    <dt><kbd>E</kbd></dt><dd>Board / leave the boat</dd>
+    <dt><kbd>F</kbd></dt><dd>Cast · reel in when the float dips</dd>
+    <dt><kbd>V</kbd></dt><dd>Follow ⇄ Explore camera</dd>
+    <dt><kbd>M</kbd></dt><dd>Map</dd>
+  </dl>
+  <p>Hold the left mouse button (or a finger) on the ground or water to walk or steer there. Right-drag turns the camera; the wheel zooms.</p>
+  <button id="quality-btn" class="text-button">Detail: high</button>
+</aside>
+
+<footer id="hud" class="hud hidden-ui">
+  <span class="line"></span>
+  <div id="place"><span id="place-name">Old Jetty</span><span id="place-caption"></span></div>
+</footer>
+<div class="actions">
+  <button id="act-e" class="act hidden-ui"><kbd>E</kbd><span></span></button>
+  <button id="act-f" class="act hidden-ui"><kbd>F</kbd><span></span></button>
+</div>
+<div id="compass" class="compass hidden-ui" aria-hidden="true"><span>N</span>
+  <svg id="needle" viewBox="0 0 40 40"><path d="M20 4 24 20 20 17 16 20Z" fill="#e8c88a"/><path d="M20 36 24 20 20 23 16 20Z" fill="#f2eddb" opacity=".35"/></svg>
+</div>
+<div id="toast" class="toast hidden-ui" role="status"></div>
+<div id="fps" hidden></div>
+<div id="error" class="error" hidden role="alert"><h2 class="serif">The pond didn't load.</h2><p id="error-msg"></p><button onclick="location.reload()">Try again</button></div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.186.1/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.186.1/examples/jsm/"
+  }
+}
+</script>
+<script type="module">
+// ==== IMPORTS ================================================================
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+// ==== ERROR SURFACE ==========================================================
+const $ = (id) => document.getElementById(id);
+function fail(msg) {
+  $('error-msg').textContent = String(msg);
+  $('error').hidden = false;
+}
+addEventListener('error', (e) => fail(e.message));
+addEventListener('unhandledrejection', (e) => fail(e.reason?.message ?? e.reason));
+if (!document.createElement('canvas').getContext('webgl2')) {
+  fail('This page needs WebGL2, which this browser does not provide.');
+  throw new Error('no webgl2');
+}
+
+// ==== PARAMETERS =============================================================
+const Q = new URLSearchParams(location.search);
+const PARAMS = {
+  scale: Math.min(Math.max(parseFloat(Q.get('scale')) || 1, 0.25), 2),
+  seed: parseInt(Q.get('seed')) || 7,
+  debug: Q.has('debug'),
+  test: Q.has('test'),
+};
+const WORLD = 200, GRID = 257, HALF = WORLD / 2, CELL = WORLD / (GRID - 1);
+const WATER_LEVEL = 0;
+const DECK_Y = 0.5;
+const SKY_TOP = new THREE.Color('#6f9fc6'), SKY_HORIZON = new THREE.Color('#d3ddcd');
+const SUN_COLOR = new THREE.Color('#fff0d4');
+
+// ==== SMALL UTILITIES ========================================================
+const clamp = (v, a, b) => Math.min(Math.max(v, a), b);
+const lerp = (a, b, t) => a + (b - a) * t;
+const smoothstep = (a, b, v) => { const t = clamp((v - a) / (b - a), 0, 1); return t * t * (3 - 2 * t); };
+const damp = (a, b, lambda, dt) => lerp(a, b, 1 - Math.exp(-lambda * dt));
+const wrapAngle = (a) => Math.atan2(Math.sin(a), Math.cos(a));
+const dampAngle = (a, b, lambda, dt) => a + wrapAngle(b - a) * (1 - Math.exp(-lambda * dt));
+function mulberry32(s) {
+  return () => { s |= 0; s = (s + 0x6d2b79f5) | 0; let t = Math.imul(s ^ (s >>> 15), 1 | s); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
+}
+const rng = mulberry32(PARAMS.seed);
+const rand = (a, b) => a + (b - a) * rng();
+function makeNoise(seed) {
+  const r = mulberry32(seed * 9973 + 1);
+  const p = [...Array(256).keys()];
+  for (let i = 255; i > 0; i--) { const j = Math.floor(r() * (i + 1)); [p[i], p[j]] = [p[j], p[i]]; }
+  const perm = new Uint16Array(512); for (let i = 0; i < 512; i++) perm[i] = p[i & 255];
+  const val = Float32Array.from({ length: 256 }, r);
+  return (x, y) => {
+    const xi = Math.floor(x), yi = Math.floor(y), xf = x - xi, yf = y - yi;
+    const u = xf * xf * (3 - 2 * xf), v = yf * yf * (3 - 2 * yf), X = xi & 255, Y = yi & 255;
+    const a = val[perm[perm[X] + Y]], b = val[perm[perm[X + 1] + Y]];
+    const c = val[perm[perm[X] + Y + 1]], d = val[perm[perm[X + 1] + Y + 1]];
+    return lerp(lerp(a, b, u), lerp(c, d, u), v);
+  };
+}
+const noise = makeNoise(PARAMS.seed);
+function fbm(x, y) { let s = 0, a = 0.5, f = 1; for (let o = 0; o < 4; o++) { s += a * noise(x * f, y * f); a *= 0.5; f *= 2; } return s / 0.9375; }
+const std = (color, opts = {}) => new THREE.MeshStandardMaterial({ color, roughness: 0.85, metalness: 0, ...opts });
+function shadows(obj, cast = true, receive = true) { obj.traverse((o) => { if (o.isMesh) { o.castShadow = cast; o.receiveShadow = receive; } }); return obj; }
+// A placed frame: local +Z points away from the pond (towards land).
+function makeFrame(px, pz, phi) {
+  const c = Math.cos(phi), s = Math.sin(phi);
+  return {
+    x: px, z: pz, phi,
+    toWorld: (lx, lz) => ({ x: px + lx * c + lz * s, z: pz - lx * s + lz * c }),
+    toLocal: (x, z) => { const dx = x - px, dz = z - pz; return { x: dx * c - dz * s, z: dx * s + dz * c }; },
+  };
+}
+
+// ==== HEIGHTFIELD (one grid feeds terrain, physics, water shader, minimap) =====
+const pondR = (th) => 34 + 5 * Math.sin(2 * th + 0.7) + 3 * Math.sin(3 * th + 2.1) + 1.5 * Math.sin(5 * th + 0.3);
+function shoreFrame(theta) {
+  const r = pondR(theta), dx = Math.cos(theta), dz = Math.sin(theta);
+  return makeFrame(dx * r, dz * r, Math.atan2(dx, dz));
+}
+const MILL = shoreFrame(0.25);
+const DOCK = shoreFrame(Math.PI + 0.6);
+const WHEEL = MILL.toWorld(0, -0.8);
+const BIRCH_THETA = Math.PI / 2, REED_THETA = -Math.PI / 2 + 0.3;
+
+function heightAt(x, z) {
+  const d = Math.hypot(x, z), s = d - pondR(Math.atan2(z, x));
+  let h = s >= 0 ? 1.8 * (1 - Math.exp(-s / 5)) : -3.6 * (1 - Math.exp(s / 7));
+  h += (fbm(x * 0.05, z * 0.05) - 0.5) * 0.6;
+  h += fbm(x * 0.025 + 11, z * 0.025 - 7) * 4.5 * smoothstep(5, 35, s);
+  h += smoothstep(55, 88, d) * 14 * (0.6 + 0.4 * fbm(x * 0.03, z * 0.03));
+  h -= 1.4 * Math.exp(-((x - WHEEL.x) ** 2 + (z - WHEEL.z) ** 2) / 5);
+  return h;
+}
+const HF = new Float32Array(GRID * GRID);
+for (let i = 0; i < GRID; i++) for (let j = 0; j < GRID; j++) HF[i * GRID + j] = heightAt(-HALF + j * CELL, -HALF + i * CELL);
+function sampleH(x, z) {
+  const fx = clamp((x + HALF) / CELL, 0, GRID - 1.001), fz = clamp((z + HALF) / CELL, 0, GRID - 1.001);
+  const j = fx | 0, i = fz | 0, tx = fx - j, tz = fz - i, k = i * GRID + j;
+  return lerp(lerp(HF[k], HF[k + 1], tx), lerp(HF[k + GRID], HF[k + GRID + 1], tx), tz);
+}
+const depthAt = (x, z) => WATER_LEVEL - sampleH(x, z);
+
+// ==== RENDERER / SCENE / CAMERA ==============================================
+const canvas = $('world');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' });
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.0;
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFShadowMap;
+const scene = new THREE.Scene();
+scene.fog = new THREE.Fog(SKY_HORIZON, 70, 210);
+const camera = new THREE.PerspectiveCamera(50, innerWidth / innerHeight, 0.1, 1000);
+camera.position.set(70, 30, 0);
+const controls = new OrbitControls(camera, canvas);
+controls.enabled = false;
+controls.enableDamping = true;
+controls.maxPolarAngle = 1.45;
+controls.minDistance = 4;
+controls.maxDistance = 140;
+const timeU = { value: 0 };
+
+// ==== SKY DOME & ENVIRONMENT ==================================================
+const sunDir = new THREE.Vector3(-0.55, 0.62, -0.56).normalize();
+function makeSkyMaterial() {
+  return new THREE.ShaderMaterial({
+    side: THREE.BackSide, depthWrite: false, fog: false,
+    uniforms: { uTop: { value: SKY_TOP }, uHorizon: { value: SKY_HORIZON }, uSun: { value: SUN_COLOR }, uSunDir: { value: sunDir } },
+    vertexShader: `varying vec3 vDir; void main(){ vDir = normalize(position); gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
+    fragmentShader: `uniform vec3 uTop, uHorizon, uSun, uSunDir; varying vec3 vDir;
+      void main(){
+        vec3 d = normalize(vDir);
+        vec3 c = mix(uHorizon, uTop, pow(clamp(d.y, 0.0, 1.0), 0.55));
+        c = mix(c, uHorizon * 0.9, smoothstep(0.0, -0.25, d.y));
+        float s = max(dot(d, uSunDir), 0.0);
+        c += uSun * (pow(s, 900.0) * 6.0 + pow(s, 10.0) * 0.22);
+        gl_FragColor = vec4(c, 1.0);
+        #include <tonemapping_fragment>
+        #include <colorspace_fragment>
+      }`,
+  });
+}
+const sky = new THREE.Mesh(new THREE.SphereGeometry(450, 32, 16), makeSkyMaterial());
+sky.frustumCulled = false;
+sky.renderOrder = -1;
+scene.add(sky);
+{
+  const envScene = new THREE.Scene();
+  envScene.add(new THREE.Mesh(new THREE.SphereGeometry(10, 32, 16), makeSkyMaterial()));
+  const pmrem = new THREE.PMREMGenerator(renderer);
+  scene.environment = pmrem.fromScene(envScene, 0.04).texture;
+  scene.environmentIntensity = 0.55;
+  pmrem.dispose();
+}
+
+// ==== LIGHTS =================================================================
+scene.add(new THREE.HemisphereLight('#cfe0e6', '#4a5a36', 0.9));
+const sun = new THREE.DirectionalLight(SUN_COLOR, 2.4);
+sun.position.copy(sunDir).multiplyScalar(120);
+sun.castShadow = true;
+Object.assign(sun.shadow.camera, { left: -85, right: 85, top: 85, bottom: -85, near: 10, far: 300 });
+sun.shadow.bias = -0.0004;
+sun.shadow.normalBias = 0.04;
+scene.add(sun);
+
+// ==== TERRAIN ================================================================
+const terrain = (() => {
+  const geo = new THREE.PlaneGeometry(WORLD, WORLD, GRID - 1, GRID - 1);
+  geo.rotateX(-Math.PI / 2);
+  const pos = geo.attributes.position;
+  for (let k = 0; k < pos.count; k++) pos.setY(k, HF[k]);
+  geo.computeVertexNormals();
+  const nrm = geo.attributes.normal, col = new Float32Array(pos.count * 3);
+  const mud = new THREE.Color('#4c5238'), mudDeep = new THREE.Color('#2f3d33'), sand = new THREE.Color('#b3a074');
+  const grass = new THREE.Color('#5d8a3a'), grassDark = new THREE.Color('#41692c'), meadow = new THREE.Color('#8aa553'), rock = new THREE.Color('#6e7264');
+  const c = new THREE.Color();
+  for (let k = 0; k < pos.count; k++) {
+    const x = pos.getX(k), z = pos.getZ(k), h = HF[k], n = fbm(x * 0.08, z * 0.08);
+    if (h < -0.3) c.copy(mud).lerp(mudDeep, smoothstep(-0.3, -3, h));
+    else if (h < 0.35) c.copy(sand).lerp(mud, smoothstep(0.0, -0.3, h)).lerp(grass, smoothstep(0.15, 0.35, h));
+    else c.copy(grass).lerp(grassDark, n).lerp(meadow, smoothstep(0.6, 0.8, fbm(x * 0.03 + 5, z * 0.03)) * 0.7);
+    c.lerp(rock, smoothstep(0.86, 0.7, nrm.getY(k)));
+    col.set([c.r, c.g, c.b], k * 3);
+  }
+  geo.setAttribute('color', new THREE.BufferAttribute(col, 3));
+  const mesh = new THREE.Mesh(geo, std('#ffffff', { vertexColors: true, roughness: 0.95 }));
+  mesh.receiveShadow = true;
+  scene.add(mesh);
+  return mesh;
+})();
+
+// ==== WATER (flat plane, shader waves, depth from the heightfield) ===========
+const wakes = Array.from({ length: 16 }, () => new THREE.Vector4(0, 0, 99, 0));
+let wakeNext = 0;
+function emitWake(x, z, strength) {
+  wakes[wakeNext].set(x, z, 0, strength);
+  wakeNext = (wakeNext + 1) % wakes.length;
+}
+const depthTex = (() => {
+  const data = new Uint8Array(GRID * GRID);
+  for (let k = 0; k < data.length; k++) data[k] = Math.round(clamp((WATER_LEVEL - HF[k]) / 4, 0, 1) * 255);
+  const t = new THREE.DataTexture(data, GRID, GRID, THREE.RedFormat, THREE.UnsignedByteType);
+  t.unpackAlignment = 1;
+  t.magFilter = t.minFilter = THREE.LinearFilter;
+  t.needsUpdate = true;
+  return t;
+})();
+const waterMat = new THREE.ShaderMaterial({
+  transparent: true, depthWrite: false,
+  uniforms: {
+    uTime: timeU, uDepth: { value: depthTex }, uWorld: { value: WORLD }, uGrid: { value: GRID }, uDetail: { value: 1 },
+    uSunDir: { value: sunDir }, uSunColor: { value: SUN_COLOR }, uSkyTop: { value: SKY_TOP }, uSkyHorizon: { value: SKY_HORIZON },
+    uDeep: { value: new THREE.Color('#163f3a') }, uShallow: { value: new THREE.Color('#4f8064') },
+    uFogColor: { value: SKY_HORIZON }, uFogNear: { value: scene.fog.near }, uFogFar: { value: scene.fog.far },
+    uWake: { value: wakes },
+  },
+  vertexShader: `varying vec3 vWorld;
+    void main(){ vec4 w = modelMatrix * vec4(position, 1.0); vWorld = w.xyz; gl_Position = projectionMatrix * viewMatrix * w; }`,
+  fragmentShader: `
+    uniform float uTime, uWorld, uGrid, uDetail, uFogNear, uFogFar;
+    uniform sampler2D uDepth;
+    uniform vec3 uSunDir, uSunColor, uSkyTop, uSkyHorizon, uDeep, uShallow, uFogColor;
+    uniform vec4 uWake[16];
+    varying vec3 vWorld;
+    float hash(vec2 p){ p = fract(p * vec2(123.34, 456.21)); p += dot(p, p + 45.32); return fract(p.x * p.y); }
+    float vnoise(vec2 p){ vec2 i = floor(p), f = fract(p), u = f * f * (3.0 - 2.0 * f);
+      return mix(mix(hash(i), hash(i + vec2(1, 0)), u.x), mix(hash(i + vec2(0, 1)), hash(i + vec2(1, 1)), u.x), u.y); }
+    vec2 ngrad(vec2 q){ float e = 0.05, c = vnoise(q); return vec2(vnoise(q + vec2(e, 0.0)) - c, vnoise(q + vec2(0.0, e)) - c) / e; }
+    void wave(inout vec2 g, vec2 p, vec2 d, float f, float a, float s){ d = normalize(d); g += d * f * a * cos(dot(d, p) * f + uTime * s); }
+    void main(){
+      vec2 p = vWorld.xz;
+      float depth = texture2D(uDepth, ((p + uWorld * 0.5) / uWorld * (uGrid - 1.0) + 0.5) / uGrid).r * 4.0;
+      if (depth < 0.002) discard;
+      vec2 g = vec2(0.0);
+      wave(g, p, vec2(0.8, 0.6), 0.9, 0.040, 1.1);
+      wave(g, p, vec2(-0.6, 0.8), 1.4, 0.028, 1.4);
+      wave(g, p, vec2(0.2, -1.0), 2.3, 0.016, 1.9);
+      wave(g, p, vec2(-0.9, -0.4), 3.1, 0.011, 2.3);
+      wave(g, p, vec2(0.7, -0.7), 4.7, 0.006, 3.0);
+      if (uDetail > 0.5) {
+        g += ngrad(p * 1.7 + vec2(uTime * 0.35, uTime * 0.21)) * 0.05;
+        g += ngrad(p * 3.3 - vec2(uTime * 0.27, -uTime * 0.31)) * 0.03;
+      }
+      for (int i = 0; i < 16; i++) {
+        vec4 w = uWake[i];
+        if (w.w <= 0.0) continue;
+        vec2 dv = p - w.xy; float d = length(dv) + 1e-4, r = w.z * 2.2;
+        float ring = exp(-pow((d - r) * 1.6, 2.0)) * w.w * exp(-w.z * 0.9);
+        g += (dv / d) * sin((d - r) * 8.0) * ring * 0.35;
+      }
+      vec3 n = normalize(vec3(-g.x, 1.0, -g.y));
+      vec3 V = normalize(cameraPosition - vWorld);
+      float fres = 0.02 + 0.98 * pow(1.0 - max(dot(n, V), 0.0), 5.0);
+      vec3 R = reflect(-V, n);
+      vec3 skyC = mix(uSkyHorizon, uSkyTop, pow(clamp(R.y, 0.0, 1.0), 0.55));
+      float shallow = 1.0 - smoothstep(0.0, 2.2, depth);
+      vec3 body = mix(uDeep, uShallow, shallow);
+      float caust = vnoise(p * 1.3 + n.xz * 4.0 + uTime * 0.2) * vnoise(p * 2.1 - uTime * 0.15);
+      body += uShallow * caust * 0.6 * shallow * shallow;
+      vec3 col = mix(body, skyC, fres * 0.85);
+      col += uSunColor * pow(max(dot(R, uSunDir), 0.0), 260.0) * 3.5;
+      float shore = 1.0 - smoothstep(0.0, 0.35, depth);
+      float foam = smoothstep(0.62, 0.9, shore + (vnoise(p * 2.2 + vec2(uTime * 0.15, -uTime * 0.1)) - 0.5) * 0.5 + 0.1 * sin(uTime * 1.2 + depth * 30.0));
+      col = mix(col, vec3(0.92, 0.94, 0.88), foam * 0.75);
+      float alpha = smoothstep(0.0, 0.06, depth) * mix(0.6, 0.96, smoothstep(0.0, 2.0, depth));
+      alpha = max(alpha, foam * 0.8 * smoothstep(0.0, 0.03, depth));
+      col = mix(col, uFogColor, smoothstep(uFogNear, uFogFar, length(cameraPosition - vWorld)));
+      gl_FragColor = vec4(col, alpha);
+      #include <tonemapping_fragment>
+      #include <colorspace_fragment>
+    }`,
+});
+const water = new THREE.Mesh(new THREE.PlaneGeometry(100, 100).rotateX(-Math.PI / 2), waterMat);
+water.position.y = WATER_LEVEL;
+water.renderOrder = 2;
+scene.add(water);
+
+// ==== WIND SWAY (shared onBeforeCompile for instanced foliage) ================
+function swayMaterial(mat, strength) {
+  mat.onBeforeCompile = (sh) => {
+    sh.uniforms.uTime = timeU;
+    sh.vertexShader = 'uniform float uTime;\n' + sh.vertexShader.replace('#include <begin_vertex>', `#include <begin_vertex>
+      #ifdef USE_INSTANCING
+        vec2 ip = instanceMatrix[3].xz;
+      #else
+        vec2 ip = vec2(0.0);
+      #endif
+      float sw = max(position.y, 0.0) * ${strength.toFixed(3)};
+      transformed.x += sin(uTime * 1.3 + ip.x * 0.21 + ip.y * 0.17) * sw;
+      transformed.z += cos(uTime * 1.05 + ip.x * 0.13 - ip.y * 0.19) * sw * 0.8;`);
+  };
+  return mat;
+}
+
+// ==== NATURE: trees, reeds, rocks, lily pads (instanced) ======================
+const blockedForProps = (x, z, pad) => {
+  const m = MILL.toLocal(x, z), d = DOCK.toLocal(x, z);
+  return (Math.abs(m.x) < 5 + pad && m.z > -3 - pad && m.z < 8 + pad) || (Math.abs(d.x) < 3 + pad && d.z > -12 - pad && d.z < 4 + pad);
+};
+const treeSpots = [];
+const nature = (() => {
+  const m = new THREE.Matrix4(), q = new THREE.Quaternion(), s = new THREE.Vector3(), p = new THREE.Vector3(), up = new THREE.Vector3(0, 1, 0), c = new THREE.Color();
+  const trees = [];
+  for (let tries = 0; tries < 2400 && trees.length < 190; tries++) {
+    const a = rand(-Math.PI, Math.PI), d = rand(40, 86), x = Math.cos(a) * d, z = Math.sin(a) * d;
+    const sh = d - pondR(Math.atan2(z, x)), h = sampleH(x, z);
+    if (sh < 5 || h > 11 || blockedForProps(x, z, 3)) continue;
+    if (trees.some((t) => (t.x - x) ** 2 + (t.z - z) ** 2 < 9)) continue;
+    const birch = Math.abs(wrapAngle(a - BIRCH_THETA)) < 0.55 ? rng() < 0.85 : rng() < 0.15;
+    trees.push({ x, z, h, birch, height: rand(2.2, 4.2), crown: rand(0.9, 1.45) });
+  }
+  treeSpots.push(...trees);
+
+  const trunkGeo = new THREE.CylinderGeometry(0.16, 0.26, 1, 6).translate(0, 0.5, 0);
+  const trunks = new THREE.InstancedMesh(trunkGeo, std('#ffffff'), trees.length);
+  const crownGeo = new THREE.IcosahedronGeometry(1.6, 1);
+  { const cp = crownGeo.attributes.position;
+    for (let k = 0; k < cp.count; k++) {
+      p.fromBufferAttribute(cp, k);
+      const j = 1 + (noise(p.x * 1.7 + 3, p.y * 1.7 + p.z * 1.3) - 0.5) * 0.45;
+      cp.setXYZ(k, p.x * j, p.y * j * 1.15 + 1.6, p.z * j);
+    }
+    crownGeo.computeVertexNormals(); }
+  const crowns = new THREE.InstancedMesh(crownGeo, swayMaterial(std('#ffffff', { flatShading: true }), 0.05), trees.length);
+  trees.forEach((t, i) => {
+    q.setFromAxisAngle(up, rand(0, Math.PI * 2));
+    m.compose(p.set(t.x, t.h - 0.2, t.z), q, s.set(t.birch ? 0.8 : 1, t.height, t.birch ? 0.8 : 1));
+    trunks.setMatrixAt(i, m);
+    trunks.setColorAt(i, c.set(t.birch ? '#e4e0d2' : '#5a4632'));
+    const cs = t.crown * (t.birch ? 0.85 : 1);
+    m.compose(p.set(t.x, t.h + t.height - 0.9, t.z), q, s.set(cs, cs * (t.birch ? 1.3 : 1), cs));
+    crowns.setMatrixAt(i, m);
+    crowns.setColorAt(i, c.set(t.birch ? '#93b05a' : rng() < 0.5 ? '#4f7a38' : '#3e6531').offsetHSL(rand(-0.02, 0.02), 0, rand(-0.04, 0.04)));
+  });
+  shadows(trunks); shadows(crowns);
+  scene.add(trunks, crowns);
+
+  const reedGeo = new THREE.ConeGeometry(0.035, 1.5, 4).translate(0, 0.75, 0);
+  const reedList = [];
+  for (let tries = 0; tries < 9000 && reedList.length < 700; tries++) {
+    const a = rand(-Math.PI, Math.PI), dense = Math.abs(wrapAngle(a - REED_THETA)) < 0.5;
+    if (!dense && rng() > 0.25) continue;
+    const r = pondR(a) + rand(-3, 1), x = Math.cos(a) * r, z = Math.sin(a) * r, h = sampleH(x, z);
+    if (h < -0.7 || h > 0.25 || blockedForProps(x, z, 1)) continue;
+    reedList.push({ x, z, h });
+  }
+  const reeds = new THREE.InstancedMesh(reedGeo, swayMaterial(std('#ffffff'), 0.12), reedList.length);
+  reedList.forEach((r, i) => {
+    q.setFromAxisAngle(new THREE.Vector3(rand(-1, 1), 0, rand(-1, 1)).normalize(), rand(0, 0.15));
+    m.compose(p.set(r.x, r.h, r.z), q, s.setScalar(rand(0.7, 1.3)));
+    reeds.setMatrixAt(i, m);
+    reeds.setColorAt(i, c.set(rng() < 0.3 ? '#9a9a55' : '#5f7d3a'));
+  });
+  shadows(reeds, true, false);
+  scene.add(reeds);
+
+  const rockGeo = new THREE.DodecahedronGeometry(1, 0);
+  const rocks = new THREE.InstancedMesh(rockGeo, std('#ffffff', { flatShading: true }), 46);
+  for (let i = 0; i < rocks.count; i++) {
+    let x, z, tries = 0;
+    do { const a = rand(-Math.PI, Math.PI), r = pondR(a) + rand(-1, i < 30 ? 4 : 30); x = Math.cos(a) * r; z = Math.sin(a) * r; }
+    while (blockedForProps(x, z, 1) && ++tries < 20);
+    q.setFromEuler(new THREE.Euler(rand(0, 3), rand(0, 3), rand(0, 3)));
+    const k = rand(0.25, 0.9);
+    m.compose(p.set(x, sampleH(x, z) - k * 0.2, z), q, s.set(k * rand(1, 1.6), k * rand(0.6, 1), k * rand(1, 1.4)));
+    rocks.setMatrixAt(i, m);
+    rocks.setColorAt(i, c.set('#8a8a7c').offsetHSL(0, 0, rand(-0.08, 0.05)));
+  }
+  shadows(rocks);
+  scene.add(rocks);
+
+  const padGeo = new THREE.CircleGeometry(0.45, 14, 0.3, Math.PI * 2 - 0.6).rotateX(-Math.PI / 2);
+  const pads = [];
+  for (let cl = 0; cl < 9; cl++) {
+    const a = rand(-Math.PI, Math.PI), r = pondR(a) - rand(4, 10), cx = Math.cos(a) * r, cz = Math.sin(a) * r;
+    if (blockedForProps(cx, cz, 3)) continue;
+    for (let k = 0; k < 10; k++) {
+      const x = cx + rand(-3, 3), z = cz + rand(-3, 3), dep = depthAt(x, z);
+      if (dep > 0.4 && dep < 2.2) pads.push({ x, z, s: rand(0.7, 1.4), flower: rng() < 0.18 });
+    }
+  }
+  const padMesh = new THREE.InstancedMesh(padGeo, std('#ffffff', { roughness: 0.5, side: THREE.DoubleSide }), pads.length);
+  const flowers = pads.filter((pd) => pd.flower);
+  const flowerMesh = new THREE.InstancedMesh(new THREE.IcosahedronGeometry(0.13, 0), std('#f1d6e0', { flatShading: true }), Math.max(flowers.length, 1));
+  flowerMesh.count = flowers.length;
+  pads.forEach((pd, i) => {
+    q.setFromAxisAngle(up, rand(0, Math.PI * 2));
+    m.compose(p.set(pd.x, WATER_LEVEL + 0.03, pd.z), q, s.setScalar(pd.s));
+    padMesh.setMatrixAt(i, m);
+    padMesh.setColorAt(i, c.set('#4d7a35').offsetHSL(rand(-0.03, 0.03), 0, rand(-0.05, 0.05)));
+  });
+  flowers.forEach((pd, i) => { m.compose(p.set(pd.x + 0.1, WATER_LEVEL + 0.1, pd.z), q.identity(), s.set(1, 0.7, 1)); flowerMesh.setMatrixAt(i, m); });
+  scene.add(padMesh, flowerMesh);
+  return { crowns };
+})();
+
+// ==== THE MILL (turning wheel) ================================================
+const mill = (() => {
+  const g = new THREE.Group();
+  g.position.set(MILL.x, 0, MILL.z);
+  g.rotation.y = MILL.phi;
+  const stone = std('#8d877a'), plaster = std('#d8cfb7'), beam = std('#4d3a2a'), roofM = std('#7a4a34', { flatShading: true }), dark = std('#2a2520'), wood = std('#6b4a2f');
+  const box = (w, h, d, mat, x, y, z) => { const b = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat); b.position.set(x, y, z); g.add(b); return b; };
+  box(7.6, 2.8, 6.6, stone, 0, 0.6, 3.4);
+  box(7.0, 3.2, 6.0, plaster, 0, 3.6, 3.4);
+  for (const x of [-3.45, 3.45]) for (const z of [0.45, 6.35]) box(0.22, 3.2, 0.22, beam, x, 3.6, z);
+  box(7.1, 0.22, 6.1, beam, 0, 2.05, 3.4);
+  const roofShape = new THREE.Shape([new THREE.Vector2(-3.7, 0), new THREE.Vector2(3.7, 0), new THREE.Vector2(0, 2.7)]);
+  const roof = new THREE.Mesh(new THREE.ExtrudeGeometry(roofShape, { depth: 8, bevelEnabled: false }).translate(0, 0, -4).rotateY(Math.PI / 2), roofM);
+  roof.position.set(0, 5.15, 3.4);
+  g.add(roof);
+  for (const x of [-1.9, 1.9]) box(0.9, 0.95, 0.1, dark, x, 3.7, 0.36);
+  box(1.3, 2.1, 0.1, dark, 2.0, 1.1, 6.75);
+  box(0.7, 1.8, 0.7, stone, 2.4, 6.9, 4.6);
+  const axle = new THREE.Mesh(new THREE.CylinderGeometry(0.16, 0.16, 1.6, 8).rotateX(Math.PI / 2), wood);
+  axle.position.set(0, 1.6, -0.2);
+  g.add(axle);
+  const wheel = new THREE.Group();
+  wheel.position.set(0, 1.6, -0.8);
+  for (const z of [-0.45, 0.45]) {
+    const rim = new THREE.Mesh(new THREE.TorusGeometry(2.4, 0.09, 6, 32), wood); rim.position.z = z; wheel.add(rim);
+    for (let k = 0; k < 4; k++) { const sp = new THREE.Mesh(new THREE.BoxGeometry(0.12, 4.7, 0.12), wood); sp.position.z = z; sp.rotation.z = (k * Math.PI) / 4; wheel.add(sp); }
+  }
+  wheel.add(new THREE.Mesh(new THREE.CylinderGeometry(0.35, 0.35, 1.1, 10).rotateX(Math.PI / 2), wood));
+  for (let k = 0; k < 16; k++) {
+    const a = (k / 16) * Math.PI * 2, pad = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.6, 1.0), wood);
+    pad.position.set(Math.cos(a) * 2.3, Math.sin(a) * 2.3, 0);
+    pad.rotation.z = a - Math.PI / 2;
+    wheel.add(pad);
+  }
+  g.add(wheel);
+  shadows(g);
+  scene.add(g);
+  return { wheel };
+})();
+
+// ==== THE JETTY ===============================================================
+const DOCK_RECT = { x: 1.2, z0: -11, z1: 1.6 };
+{
+  const g = new THREE.Group();
+  g.position.set(DOCK.x, 0, DOCK.z);
+  g.rotation.y = DOCK.phi;
+  const n = Math.round((DOCK_RECT.z1 - DOCK_RECT.z0) / 0.36);
+  const planks = new THREE.InstancedMesh(new THREE.BoxGeometry(2.4, 0.08, 0.31), std('#ffffff'), n);
+  const m = new THREE.Matrix4(), c = new THREE.Color();
+  for (let k = 0; k < n; k++) {
+    m.makeRotationY(rand(-0.015, 0.015)).setPosition(rand(-0.03, 0.03), DECK_Y - 0.04, DOCK_RECT.z0 + 0.18 + k * 0.36);
+    planks.setMatrixAt(k, m);
+    planks.setColorAt(k, c.set('#8b6a48').offsetHSL(0, rand(-0.05, 0.03), rand(-0.07, 0.05)));
+  }
+  g.add(planks);
+  const postMat = std('#4f3b2a');
+  for (let z = DOCK_RECT.z0 + 0.2; z < DOCK_RECT.z1; z += 2.8) for (const x of [-1.2, 1.2]) {
+    const post = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.14, 3.4, 7), postMat);
+    post.position.set(x, -0.95, z);
+    g.add(post);
+  }
+  for (const x of [-0.9, 0.9]) {
+    const beam = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.18, DOCK_RECT.z1 - DOCK_RECT.z0), postMat);
+    beam.position.set(x, DECK_Y - 0.17, (DOCK_RECT.z0 + DOCK_RECT.z1) / 2);
+    g.add(beam);
+  }
+  shadows(g);
+  scene.add(g);
+}
+const onDock = (x, z) => { const l = DOCK.toLocal(x, z); return Math.abs(l.x) < DOCK_RECT.x && l.z > DOCK_RECT.z0 && l.z < DOCK_RECT.z1; };
+const inMill = (x, z, pad = 0) => { const l = MILL.toLocal(x, z); return Math.abs(l.x) < 3.9 + pad && l.z > -1.5 - pad && l.z < 6.8 + pad; };
+const inDockHull = (x, z, pad) => { const l = DOCK.toLocal(x, z); return Math.abs(l.x) < DOCK_RECT.x + pad && l.z > DOCK_RECT.z0 - pad && l.z < DOCK_RECT.z1 + pad; };
+function walkable(x, z) {
+  if (Math.hypot(x, z) > 84 || inMill(x, z)) return false;
+  return onDock(x, z) || sampleH(x, z) > -0.45;
+}
+const groundY = (x, z) => (onDock(x, z) ? Math.max(DECK_Y, sampleH(x, z)) : sampleH(x, z));
+
+// ==== THE KEEPER (pivot-rigged figure) ========================================
+const keeper = (() => {
+  const g = new THREE.Group();
+  const coat = std('#4f6b4a'), trousers = std('#3b3a36'), skin = std('#dfb08a'), hatM = std('#d6c288'), boot = std('#2b241e');
+  const hips = new THREE.Group(); hips.position.y = 0.95; g.add(hips);
+  const leg = (x) => {
+    const p = new THREE.Group(); p.position.x = x;
+    const l = new THREE.Mesh(new THREE.CapsuleGeometry(0.11, 0.62, 4, 8), trousers); l.position.y = -0.42; p.add(l);
+    const b = new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.12, 0.32), boot); b.position.set(0, -0.88, 0.05); p.add(b);
+    hips.add(p); return p;
+  };
+  const legL = leg(-0.14), legR = leg(0.14);
+  const torso = new THREE.Mesh(new THREE.CapsuleGeometry(0.26, 0.45, 4, 10), coat); torso.position.y = 0.42; hips.add(torso);
+  const head = new THREE.Mesh(new THREE.SphereGeometry(0.17, 14, 10), skin); head.position.y = 0.98; hips.add(head);
+  const brim = new THREE.Mesh(new THREE.CylinderGeometry(0.33, 0.33, 0.03, 18), hatM); brim.position.y = 1.1; hips.add(brim);
+  const crown = new THREE.Mesh(new THREE.CylinderGeometry(0.16, 0.19, 0.17, 14), hatM); crown.position.y = 1.19; hips.add(crown);
+  const arm = (x) => {
+    const p = new THREE.Group(); p.position.set(x, 0.68, 0);
+    const a = new THREE.Mesh(new THREE.CapsuleGeometry(0.075, 0.48, 4, 8), coat); a.position.y = -0.3; p.add(a);
+    const h = new THREE.Mesh(new THREE.SphereGeometry(0.075, 8, 6), skin); h.position.y = -0.6; p.add(h);
+    hips.add(p); return p;
+  };
+  const armL = arm(-0.34), armR = arm(0.34);
+  const rod = new THREE.Mesh(new THREE.CylinderGeometry(0.012, 0.028, 2.4, 6).translate(0, 1.2, 0), std('#3a2a1c'));
+  rod.position.y = -0.6; rod.rotation.x = 1.5; rod.visible = false; armR.add(rod);
+  const rodTip = new THREE.Object3D(); rodTip.position.y = 2.4; rod.add(rodTip);
+  shadows(g, true, false);
+  scene.add(g);
+  return { g, hips, legL, legR, armL, armR, rod, rodTip, phase: 0, facing: 0, speed: 0 };
+})();
+
+// ==== THE BOAT ================================================================
+const boat = (() => {
+  const g = new THREE.Group(), body = new THREE.Group(); g.add(body);
+  const hull = new THREE.Mesh(new THREE.SphereGeometry(1, 22, 10, 0, Math.PI * 2, Math.PI / 2, Math.PI / 2), std('#6f4a2e', { side: THREE.DoubleSide }));
+  hull.scale.set(1.05, 0.55, 2.5); body.add(hull);
+  const rim = new THREE.Mesh(new THREE.TorusGeometry(1, 0.06, 6, 40).rotateX(Math.PI / 2), std('#d8ccad'));
+  rim.scale.set(1.05, 1, 2.5); body.add(rim);
+  for (const z of [0.9, -0.5, -1.25]) { const seat = new THREE.Mesh(new THREE.BoxGeometry(z === -1.25 ? 1.3 : 1.95, 0.07, 0.36), std('#a77b50')); seat.position.set(0, -0.12, z); body.add(seat); }
+  const motor = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.45, 0.4), std('#2f4a52', { roughness: 0.5 })); motor.position.set(0, 0.25, -2.55); body.add(motor);
+  const shaft = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.04, 0.9, 6), std('#333333')); shaft.position.set(0, -0.2, -2.6); body.add(shaft);
+  shadows(g);
+  scene.add(g);
+  const moor = DOCK.toWorld(2.6, -8);
+  const st = { g, body, x: moor.x, z: moor.z, heading: DOCK.phi + Math.PI, speed: 0, turn: 0, wakeT: 0, moor, moorHeading: DOCK.phi + Math.PI };
+  return st;
+})();
+const boatForward = () => new THREE.Vector3(Math.sin(boat.heading), 0, Math.cos(boat.heading));
+function boatBlocked(x, z, heading) {
+  const fx = Math.sin(heading), fz = Math.cos(heading);
+  for (const t of [-2.2, 0, 2.2]) {
+    const px = x + fx * t, pz = z + fz * t;
+    if (depthAt(px, pz) < 0.35 || inDockHull(px, pz, 0.6) || inMill(px, pz, 0.6) || Math.hypot(px, pz) > 84) return true;
+  }
+  return false;
+}
+
+// ==== FISHING (cast arc, sagging line, bite window) ===========================
+const bobber = (() => {
+  const g = new THREE.Group();
+  const top = new THREE.Mesh(new THREE.SphereGeometry(0.09, 10, 6, 0, Math.PI * 2, 0, Math.PI / 2), std('#d8402e'));
+  const bot = new THREE.Mesh(new THREE.SphereGeometry(0.09, 10, 6, 0, Math.PI * 2, Math.PI / 2, Math.PI / 2), std('#f2eee4'));
+  g.add(top, bot); g.visible = false; scene.add(g);
+  return g;
+})();
+const LINE_PTS = 16;
+const fishLine = new THREE.Line(new THREE.BufferGeometry().setAttribute('position', new THREE.BufferAttribute(new Float32Array(LINE_PTS * 3), 3)),
+  new THREE.LineBasicMaterial({ color: '#ece6cf', transparent: true, opacity: 0.75 }));
+fishLine.frustumCulled = false; fishLine.visible = false; scene.add(fishLine);
+const FISH = [['perch', 0.1, 0.6], ['roach', 0.1, 0.5], ['rudd', 0.1, 0.4], ['tench', 0.5, 2.5], ['bream', 0.6, 3], ['carp', 1.5, 6], ['pike', 1.5, 7]];
+const fish = { state: 'idle', t: 0, timer: 0, from: new THREE.Vector3(), to: new THREE.Vector3() };
+const tipPos = new THREE.Vector3();
+
+// ==== WORLD STATE & INPUT =====================================================
+const state = { mode: 'intro', view: 'follow', time: 0 };
+const keys = new Set();
+const hold = { active: false, sx: 0, sy: 0, target: null };
+const cam = { yaw: 0, pitch: 0.32, dist: 9, userT: -99, pos: new THREE.Vector3(), look: new THREE.Vector3() };
+const lastFocus = new THREE.Vector3();
+function spawnKeeper() {
+  const p = DOCK.toWorld(0, 0.6);
+  scene.add(keeper.g);
+  keeper.g.position.set(p.x, groundY(p.x, p.z), p.z);
+  keeper.facing = DOCK.phi + Math.PI;
+  keeper.g.rotation.set(0, keeper.facing, 0);
+  cam.yaw = DOCK.phi;
+}
+spawnKeeper();
+function focusPoint(out = new THREE.Vector3()) {
+  return state.mode === 'boat' ? out.set(boat.x, 1.0, boat.z) : out.copy(keeper.g.position).setY(keeper.g.position.y + 1.4);
+}
+
+// ==== ACTIONS: board, land, fish ==============================================
+function nearBoat() { return Math.hypot(keeper.g.position.x - boat.x, keeper.g.position.z - boat.z) < 3.4; }
+function findLanding() {
+  let best = null, bestD = Infinity;
+  for (const r of [2.0, 2.8, 3.6]) for (let k = 0; k < 20; k++) {
+    const a = (k / 20) * Math.PI * 2, x = boat.x + Math.cos(a) * r, z = boat.z + Math.sin(a) * r;
+    if (!walkable(x, z) || (!onDock(x, z) && sampleH(x, z) < -0.2)) continue;
+    if (r < bestD) { bestD = r; best = { x, z }; }
+  }
+  return best;
+}
+function board() {
+  cancelFishing();
+  state.mode = 'boat';
+  boat.body.add(keeper.g);
+  keeper.g.position.set(0, -1.02, -1.25);
+  keeper.g.rotation.set(0, 0, 0);
+  toast('Aboard. W to motor out, Space to brake.');
+}
+function disembark(p) {
+  cancelFishing();
+  state.mode = 'walk';
+  boat.speed = 0;
+  scene.add(keeper.g);
+  keeper.g.position.set(p.x, groundY(p.x, p.z), p.z);
+  keeper.facing = Math.atan2(p.x - boat.x, p.z - boat.z);
+  keeper.g.rotation.set(0, keeper.facing, 0);
+  keeper.legL.rotation.x = keeper.legR.rotation.x = 0;
+}
+function castTarget() {
+  const f = state.mode === 'boat' ? boat.heading : keeper.facing, src = focusPoint();
+  return new THREE.Vector3(src.x + Math.sin(f) * 7, WATER_LEVEL, src.z + Math.cos(f) * 7);
+}
+function canFish() {
+  if (state.mode === 'boat') return Math.abs(boat.speed) < 0.6 && depthAt(castTarget().x, castTarget().z) > 0.3;
+  if (state.mode !== 'walk') return false;
+  const t = castTarget();
+  return depthAt(t.x, t.z) > 0.5 && !inMill(t.x, t.z) && !inDockHull(t.x, t.z, 0.2);
+}
+function cast() {
+  fish.state = 'cast'; fish.t = 0;
+  keeper.rod.visible = true;
+  keeper.rodTip.getWorldPosition(fish.from);
+  fish.to.copy(castTarget());
+  audio.splash(0.2);
+}
+function cancelFishing() {
+  fish.state = 'idle';
+  keeper.rod.visible = bobber.visible = fishLine.visible = false;
+}
+function actE() {
+  if (state.mode === 'walk' && nearBoat()) board();
+  else if (state.mode === 'boat') { const p = findLanding(); if (p) disembark(p); }
+}
+function actF() {
+  if (fish.state === 'idle') { if (canFish()) cast(); }
+  else if (fish.state === 'bite') {
+    const [name, lo, hi] = FISH[Math.floor(rng() * FISH.length)];
+    toast(`A ${rand(lo, hi).toFixed(1)} kg ${name}. You let it slip back.`);
+    emitWake(bobber.position.x, bobber.position.z, 1);
+    audio.splash(0.6);
+    cancelFishing();
+  } else { toast('Reeled in. Nothing yet.'); cancelFishing(); }
+}
+
+// ==== UPDATE: keeper ==========================================================
+function moveInput() {
+  let ix = 0, iz = 0;
+  if (keys.has('KeyW') || keys.has('ArrowUp')) iz += 1;
+  if (keys.has('KeyS') || keys.has('ArrowDown')) iz -= 1;
+  if (keys.has('KeyA') || keys.has('ArrowLeft')) ix -= 1;
+  if (keys.has('KeyD') || keys.has('ArrowRight')) ix += 1;
+  return { ix, iz };
+}
+function camYaw() {
+  const d = camera.getWorldDirection(new THREE.Vector3());
+  return Math.atan2(-d.x, -d.z);
+}
+function updateKeeper(dt) {
+  const { ix, iz } = moveInput(), p = keeper.g.position;
+  let dx = 0, dz = 0;
+  if (ix || iz) {
+    const y = camYaw(), fx = -Math.sin(y), fz = -Math.cos(y), rx = Math.cos(y), rz = -Math.sin(y);
+    dx = fx * iz + rx * ix; dz = fz * iz + rz * ix;
+  } else if (hold.target) {
+    dx = hold.target.x - p.x; dz = hold.target.z - p.z;
+    if (Math.hypot(dx, dz) < 0.6) dx = dz = 0;
+  }
+  const len = Math.hypot(dx, dz);
+  const want = len > 0 ? (keys.has('ShiftLeft') || keys.has('ShiftRight') ? 6.5 : 3.6) : 0;
+  keeper.speed = damp(keeper.speed, want, 10, dt);
+  if (len > 0) {
+    if (fish.state !== 'idle') cancelFishing();
+    dx /= len; dz /= len;
+    keeper.facing = dampAngle(keeper.facing, Math.atan2(dx, dz), 12, dt);
+    const step = keeper.speed * dt, nx = p.x + dx * step, nz = p.z + dz * step;
+    if (walkable(nx, nz)) { p.x = nx; p.z = nz; }
+    else if (walkable(nx, p.z)) p.x = nx;
+    else if (walkable(p.x, nz)) p.z = nz;
+  }
+  p.y = damp(p.y, groundY(p.x, p.z), 20, dt);
+  keeper.g.rotation.y = keeper.facing;
+  const moving = smoothstep(0.2, 3, keeper.speed);
+  keeper.phase += keeper.speed * dt * 2.4;
+  const sw = Math.sin(keeper.phase) * 0.6 * moving;
+  keeper.legL.rotation.x = sw; keeper.legR.rotation.x = -sw;
+  keeper.armL.rotation.x = -sw * 0.8;
+  keeper.armR.rotation.x = fish.state !== 'idle' ? -0.7 : sw * 0.8;
+  keeper.hips.position.y = 0.95 + Math.abs(Math.cos(keeper.phase)) * 0.04 * moving + Math.sin(state.time * 1.6) * 0.008;
+  if (moving > 0.3 && depthAt(p.x, p.z) > 0.05 && !onDock(p.x, p.z) && (keeper.wadeT = (keeper.wadeT ?? 0) - dt) < 0) {
+    keeper.wadeT = 0.45; emitWake(p.x, p.z, 0.35);
+  }
+}
+
+// ==== UPDATE: boat ============================================================
+function updateBoat(dt) {
+  const driving = state.mode === 'boat';
+  let thr = 0, rud = 0;
+  if (driving) {
+    const { ix, iz } = moveInput();
+    thr = iz; rud = -ix;
+    if (!ix && !iz && hold.target) {
+      const dx = hold.target.x - boat.x, dz = hold.target.z - boat.z;
+      if (Math.hypot(dx, dz) > 3) { thr = 1; rud = clamp(wrapAngle(Math.atan2(dx, dz) - boat.heading) * 2, -1, 1); }
+    }
+    if (thr && fish.state !== 'idle') cancelFishing();
+  }
+  boat.speed += thr * (thr > 0 ? 3.2 : 2.2) * dt;
+  boat.speed = clamp(boat.speed, -2.5, 7) * Math.exp(-0.55 * dt);
+  if (driving && keys.has('Space')) boat.speed *= Math.exp(-4 * dt);
+  boat.turn = damp(boat.turn, rud, 4, dt);
+  const steer = boat.turn * 1.1 * clamp(Math.abs(boat.speed) / 2, 0.3, 1) * (boat.speed < -0.05 ? -1 : 1);
+  const nh = boat.heading + steer * dt;
+  const nx = boat.x + Math.sin(nh) * boat.speed * dt, nz = boat.z + Math.cos(nh) * boat.speed * dt;
+  if (!boatBlocked(nx, nz, nh)) { boat.x = nx; boat.z = nz; boat.heading = nh; }
+  else {
+    if (!boatBlocked(boat.x, boat.z, nh)) boat.heading = nh;
+    boat.speed = -Math.sign(boat.speed || 1) * 0.6;
+  }
+  boat.g.position.set(boat.x, 0.25 + Math.sin(state.time * 1.7) * 0.04, boat.z);
+  boat.g.rotation.y = boat.heading;
+  boat.body.rotation.z = -boat.turn * clamp(boat.speed / 7, -1, 1) * 0.12 + Math.sin(state.time * 1.3) * 0.02;
+  boat.body.rotation.x = -clamp(boat.speed / 7, -0.5, 1) * 0.06 + Math.sin(state.time * 1.1 + 1) * 0.015;
+  if (Math.abs(boat.speed) > 0.6 && (boat.wakeT -= dt) < 0) {
+    boat.wakeT = 0.22;
+    emitWake(boat.x - Math.sin(boat.heading) * 2.4, boat.z - Math.cos(boat.heading) * 2.4, Math.min(Math.abs(boat.speed) / 5, 1));
+  }
+  if (driving) {
+    keeper.legL.rotation.x = keeper.legR.rotation.x = -1.35;
+    keeper.armL.rotation.x = -0.5;
+    keeper.armR.rotation.x = fish.state !== 'idle' ? -0.7 : -0.9;
+    keeper.hips.position.y = 0.95;
+  }
+}
+
+// ==== UPDATE: fishing =========================================================
+function updateFishing(dt) {
+  if (fish.state === 'idle') return;
+  if (state.mode === 'walk') keeper.facing = dampAngle(keeper.facing, Math.atan2(fish.to.x - keeper.g.position.x, fish.to.z - keeper.g.position.z), 6, dt);
+  fish.t += dt;
+  keeper.rodTip.getWorldPosition(tipPos);
+  if (fish.state === 'cast') {
+    const k = Math.min(fish.t / 0.8, 1);
+    bobber.position.lerpVectors(tipPos, fish.to, k).setY(lerp(tipPos.y, fish.to.y, k) + 4 * k * (1 - k) * 3);
+    if (k >= 1) { fish.state = 'wait'; fish.t = 0; fish.timer = rand(3, 9); emitWake(fish.to.x, fish.to.z, 0.6); audio.splash(0.35); }
+  } else if (fish.state === 'wait') {
+    bobber.position.set(fish.to.x, WATER_LEVEL + Math.sin(state.time * 2.2) * 0.02, fish.to.z);
+    if (fish.t > fish.timer) { fish.state = 'bite'; fish.t = 0; emitWake(fish.to.x, fish.to.z, 0.9); audio.splash(0.25); }
+  } else if (fish.state === 'bite') {
+    bobber.position.set(fish.to.x, WATER_LEVEL - 0.12 + Math.sin(state.time * 18) * 0.05, fish.to.z);
+    if (fish.t > 1.4) { toast('Gone. Something nibbled and left.'); fish.state = 'wait'; fish.t = 0; fish.timer = rand(4, 10); }
+  }
+  bobber.visible = fishLine.visible = true;
+  const arr = fishLine.geometry.attributes.position.array, sag = fish.state === 'cast' ? 0.1 : 0.7;
+  for (let i = 0; i < LINE_PTS; i++) {
+    const t = i / (LINE_PTS - 1);
+    arr[i * 3] = lerp(tipPos.x, bobber.position.x, t);
+    arr[i * 3 + 1] = lerp(tipPos.y, bobber.position.y + 0.09, t) - Math.sin(Math.PI * t) * sag;
+    arr[i * 3 + 2] = lerp(tipPos.z, bobber.position.z, t);
+  }
+  fishLine.geometry.attributes.position.needsUpdate = true;
+}
+
+// ==== UPDATE: camera ==========================================================
+const tmpFocus = new THREE.Vector3(), desired = new THREE.Vector3();
+function updateCamera(dt) {
+  if (state.mode === 'intro') {
+    const a = state.time * 0.05;
+    camera.position.set(Math.cos(a) * 72, 30, Math.sin(a) * 72);
+    camera.lookAt(0, 0, 0);
+    return;
+  }
+  focusPoint(tmpFocus);
+  if (state.view === 'explore') {
+    const d = tmpFocus.clone().sub(lastFocus);
+    camera.position.add(d); controls.target.add(d);
+    controls.update();
+  } else {
+    if (state.mode === 'boat' && state.time - cam.userT > 2) cam.yaw = dampAngle(cam.yaw, boat.heading + Math.PI, 1.5, dt);
+    const d = cam.dist * (state.mode === 'boat' ? 1.4 : 1);
+    desired.set(Math.sin(cam.yaw) * Math.cos(cam.pitch) * d, Math.sin(cam.pitch) * d, Math.cos(cam.yaw) * Math.cos(cam.pitch) * d).add(tmpFocus);
+    desired.y = Math.max(desired.y, sampleH(desired.x, desired.z) + 0.9, WATER_LEVEL + 0.6);
+    const k = 1 - Math.exp(-6 * dt);
+    cam.pos.lerp(desired, k); cam.look.lerp(tmpFocus, k);
+    camera.position.copy(cam.pos); camera.lookAt(cam.look);
+  }
+  lastFocus.copy(tmpFocus);
+}
+function setView(v) {
+  state.view = v;
+  focusPoint(tmpFocus);
+  lastFocus.copy(tmpFocus);
+  if (v === 'explore') { controls.target.copy(tmpFocus); controls.enabled = true; controls.update(); }
+  else {
+    controls.enabled = false;
+    const off = camera.position.clone().sub(tmpFocus), len = off.length();
+    cam.yaw = Math.atan2(off.x, off.z);
+    cam.pitch = clamp(Math.asin(off.y / len), 0.05, 1.2);
+    cam.dist = clamp(len / (state.mode === 'boat' ? 1.4 : 1), 4, 30);
+    cam.pos.copy(camera.position); cam.look.copy(tmpFocus);
+  }
+  $('view-btn').textContent = `View: ${v === 'follow' ? 'Follow' : 'Explore'}`;
+}
+
+// ==== HUD: place names, prompts, compass, toast, minimap =======================
+const REGIONS = [
+  { name: 'The Mill', caption: 'The wheel churns the shallows white.', ...MILL.toWorld(0, 2), r: 13 },
+  { name: 'Old Jetty', caption: 'Boards worn smooth by every departure.', ...DOCK.toWorld(0, -4), r: 10 },
+  { name: 'Birch Hollow', caption: 'Pale trunks, and the hush between them.', x: Math.cos(BIRCH_THETA) * 60, z: Math.sin(BIRCH_THETA) * 60, r: 24 },
+  { name: 'Reed Shallows', caption: 'Something small just slipped under.', x: Math.cos(REED_THETA) * pondR(REED_THETA), z: Math.sin(REED_THETA) * pondR(REED_THETA), r: 14 },
+];
+const OPEN_WATER = { name: 'Open Water', caption: 'Nothing to do out here but drift.' };
+const MEADOW = { name: 'Meadow Bank', caption: 'Long grass, short shadows.' };
+let placeShown = null;
+function updatePlace(p) {
+  const r = REGIONS.find((g) => Math.hypot(p.x - g.x, p.z - g.z) < g.r) ?? (depthAt(p.x, p.z) > 0.6 ? OPEN_WATER : MEADOW);
+  if (r === placeShown) return;
+  placeShown = r;
+  const el = $('place');
+  el.style.opacity = 0;
+  setTimeout(() => { $('place-name').textContent = r.name; $('place-caption').textContent = ' · ' + r.caption; el.style.opacity = 1; }, 250);
+}
+const uiCache = {};
+function setAction(id, label, urgent = false) {
+  const key = `${label}|${urgent}`;
+  if (uiCache[id] === key) return;
+  uiCache[id] = key;
+  const el = $(id);
+  el.classList.toggle('hidden-ui', !label);
+  el.classList.toggle('urgent', urgent);
+  if (label) el.querySelector('span').textContent = label;
+}
+function updatePrompts() {
+  let e = '', f = '';
+  if (state.mode === 'walk' && nearBoat()) e = 'Board the boat';
+  if (state.mode === 'boat' && Math.abs(boat.speed) < 1.5 && findLanding()) e = 'Step ashore';
+  if (fish.state === 'idle') { if (canFish()) f = 'Cast a line'; }
+  else f = fish.state === 'bite' ? 'Reel in!' : 'Reel in';
+  setAction('act-e', e);
+  setAction('act-f', f, fish.state === 'bite');
+}
+let toastTimer = 0;
+function toast(msg) {
+  const el = $('toast');
+  el.textContent = msg;
+  el.classList.remove('hidden-ui'); el.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { el.classList.add('hidden-ui'); el.classList.remove('show'); }, 3200);
+}
+const MAP_SPAN = 172, MAP_PX = 360;
+const mapBase = (() => {
+  const c = document.createElement('canvas'); c.width = c.height = MAP_PX;
+  const ctx = c.getContext('2d'), img = ctx.createImageData(MAP_PX, MAP_PX);
+  for (let y = 0; y < MAP_PX; y++) for (let x = 0; x < MAP_PX; x++) {
+    const wx = (x / MAP_PX - 0.5) * MAP_SPAN, wz = (y / MAP_PX - 0.5) * MAP_SPAN, h = sampleH(wx, wz), k = (y * MAP_PX + x) * 4;
+    let r, g, b;
+    if (h < 0) { const t = smoothstep(0, 3, -h); r = lerp(110, 35, t); g = lerp(150, 80, t); b = lerp(130, 85, t); }
+    else { const t = smoothstep(0, 12, h); r = lerp(120, 70, t); g = lerp(150, 100, t); b = lerp(85, 60, t); }
+    img.data.set([r, g, b, 255], k);
+  }
+  ctx.putImageData(img, 0, 0);
+  const toPx = (w) => (w / MAP_SPAN + 0.5) * MAP_PX;
+  ctx.fillStyle = 'rgba(40,70,35,.75)';
+  for (const t of treeSpots) { ctx.beginPath(); ctx.arc(toPx(t.x), toPx(t.z), 2.2, 0, Math.PI * 2); ctx.fill(); }
+  ctx.save(); ctx.translate(toPx(MILL.toWorld(0, 3.4).x), toPx(MILL.toWorld(0, 3.4).z)); ctx.rotate(-MILL.phi);
+  ctx.fillStyle = '#7a4a34'; ctx.fillRect(-15, -13, 30, 26); ctx.restore();
+  const a = DOCK.toWorld(0, DOCK_RECT.z0), b = DOCK.toWorld(0, DOCK_RECT.z1);
+  ctx.strokeStyle = '#8b6a48'; ctx.lineWidth = 4; ctx.beginPath(); ctx.moveTo(toPx(a.x), toPx(a.z)); ctx.lineTo(toPx(b.x), toPx(b.z)); ctx.stroke();
+  return { canvas: c, toPx };
+})();
+function drawMap() {
+  const ctx = $('minimap').getContext('2d'), { toPx } = mapBase;
+  ctx.drawImage(mapBase.canvas, 0, 0);
+  ctx.fillStyle = '#e8c88a';
+  ctx.save(); ctx.translate(toPx(boat.x), toPx(boat.z)); ctx.rotate(-boat.heading);
+  ctx.beginPath(); ctx.ellipse(0, 0, 3.5, 8, 0, 0, Math.PI * 2); ctx.fill(); ctx.restore();
+  const kp = keeper.g.getWorldPosition(new THREE.Vector3()), f = state.mode === 'boat' ? boat.heading : keeper.facing;
+  ctx.save(); ctx.translate(toPx(kp.x), toPx(kp.z)); ctx.rotate(-f);
+  ctx.fillStyle = '#fff'; ctx.strokeStyle = '#13302c'; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(0, 9); ctx.lineTo(6, -6); ctx.lineTo(0, -3); ctx.lineTo(-6, -6); ctx.closePath(); ctx.stroke(); ctx.fill(); ctx.restore();
+}
+
+// ==== SOUND (Web Audio, synthesised) ==========================================
+const audio = (() => {
+  let ctx = null, master = null, motorGain = null, noiseBuf = null, on = false, birdTimer = 0;
+  function noiseSource(rate = 1) { const s = ctx.createBufferSource(); s.buffer = noiseBuf; s.loop = true; s.playbackRate.value = rate; return s; }
+  function lfo(freq, depth, param) { const o = ctx.createOscillator(), g = ctx.createGain(); o.frequency.value = freq; g.gain.value = depth; o.connect(g).connect(param); o.start(); }
+  function init() {
+    ctx = new AudioContext();
+    master = ctx.createGain(); master.gain.value = 0.8; master.connect(ctx.destination);
+    noiseBuf = ctx.createBuffer(1, ctx.sampleRate * 2, ctx.sampleRate);
+    const d = noiseBuf.getChannelData(0); for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+    const water = ctx.createGain(); water.gain.value = 0.05; water.connect(master);
+    const bp = ctx.createBiquadFilter(); bp.type = 'bandpass'; bp.frequency.value = 520; bp.Q.value = 0.6;
+    noiseSource().connect(bp).connect(water); lfo(0.13, 0.03, water.gain); lfo(0.07, 180, bp.frequency);
+    const lap = ctx.createGain(); lap.gain.value = 0.08; lap.connect(master);
+    const lp = ctx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 260;
+    noiseSource(0.6).connect(lp).connect(lap); lfo(0.31, 0.06, lap.gain);
+    motorGain = ctx.createGain(); motorGain.gain.value = 0; motorGain.connect(master);
+    const mlp = ctx.createBiquadFilter(); mlp.type = 'lowpass'; mlp.frequency.value = 380; mlp.connect(motorGain);
+    for (const [type, f] of [['sawtooth', 48], ['square', 96.7]]) { const o = ctx.createOscillator(); o.type = type; o.frequency.value = f; o.connect(mlp); o.start(); }
+  }
+  function chirp() {
+    const t0 = ctx.currentTime, pan = ctx.createStereoPanner(); pan.pan.value = Math.random() * 1.6 - 0.8; pan.connect(master);
+    const notes = 2 + Math.floor(Math.random() * 4), base = 2600 + Math.random() * 1400;
+    for (let i = 0; i < notes; i++) {
+      const o = ctx.createOscillator(), g = ctx.createGain(), t = t0 + i * 0.14;
+      o.frequency.setValueAtTime(base, t); o.frequency.exponentialRampToValueAtTime(base * 1.45, t + 0.05); o.frequency.exponentialRampToValueAtTime(base * 0.95, t + 0.11);
+      g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(0.035, t + 0.015); g.gain.exponentialRampToValueAtTime(0.0001, t + 0.12);
+      o.connect(g).connect(pan); o.start(t); o.stop(t + 0.13);
+    }
+  }
+  return {
+    get on() { return on; },
+    toggle() {
+      if (!ctx) init();
+      on = !on;
+      if (on) ctx.resume(); else ctx.suspend();
+      return on;
+    },
+    update(dt, throttle) {
+      if (!on) return;
+      motorGain.gain.setTargetAtTime(throttle * 0.06, ctx.currentTime, 0.15);
+      if ((birdTimer -= dt) < 0) { birdTimer = 2 + Math.random() * 5; chirp(); }
+    },
+    splash(v) {
+      if (!on) return;
+      const s = noiseSource(), bp = ctx.createBiquadFilter(), g = ctx.createGain(), t = ctx.currentTime;
+      bp.type = 'bandpass'; bp.frequency.value = 1100; bp.Q.value = 0.8;
+      g.gain.setValueAtTime(v * 0.4, t); g.gain.exponentialRampToValueAtTime(0.0001, t + 0.4);
+      s.connect(bp).connect(g).connect(master); s.start(t); s.stop(t + 0.45);
+    },
+  };
+})();
+
+// ==== QUALITY =================================================================
+let quality = 'high';
+function applyQuality() {
+  const high = quality === 'high';
+  renderer.setPixelRatio(Math.min(devicePixelRatio, high ? 2 : 1) * PARAMS.scale);
+  renderer.setSize(innerWidth, innerHeight, false);
+  sun.shadow.mapSize.setScalar(high ? 2048 : 1024);
+  if (sun.shadow.map) { sun.shadow.map.dispose(); sun.shadow.map = null; }
+  waterMat.uniforms.uDetail.value = high ? 1 : 0;
+  nature.crowns.castShadow = high;
+  $('quality-btn').textContent = `Detail: ${quality}`;
+}
+applyQuality();
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight, false);
+});
+
+// ==== INPUT WIRING ============================================================
+const panels = { map: ['map-panel', 'map-btn'], help: ['help-panel', 'help-btn'] };
+function togglePanel(name, force) {
+  for (const [n, [pid, bid]] of Object.entries(panels)) {
+    const open = n === name ? force ?? $(pid).classList.contains('hidden-ui') : false;
+    $(pid).classList.toggle('hidden-ui', !open);
+    $(bid).setAttribute('aria-expanded', String(open));
+  }
+}
+function start() {
+  if (state.mode !== 'intro') return;
+  state.mode = 'walk';
+  $('intro').classList.add('hidden-ui');
+  for (const id of ['topbar', 'hud', 'compass']) $(id).classList.remove('hidden-ui');
+  focusPoint(tmpFocus);
+  cam.look.copy(tmpFocus);
+  cam.pos.copy(camera.position);
+  canvas.focus();
+  toast('Hold the left mouse button on the ground to walk there.');
+}
+$('start').addEventListener('click', start);
+$('view-btn').addEventListener('click', () => setView(state.view === 'follow' ? 'explore' : 'follow'));
+$('sound-btn').addEventListener('click', () => {
+  const on = audio.toggle();
+  $('sound-btn').textContent = on ? 'Sound on' : 'Sound off';
+  $('sound-btn').setAttribute('aria-pressed', String(on));
+});
+$('map-btn').addEventListener('click', () => togglePanel('map'));
+$('help-btn').addEventListener('click', () => togglePanel('help'));
+document.querySelectorAll('[data-close]').forEach((b) => b.addEventListener('click', () => togglePanel(b.dataset.close, false)));
+$('quality-btn').addEventListener('click', () => { quality = quality === 'high' ? 'low' : 'high'; applyQuality(); });
+$('return-btn').addEventListener('click', () => {
+  cancelFishing();
+  boat.x = boat.moor.x; boat.z = boat.moor.z; boat.heading = boat.moorHeading; boat.speed = 0;
+  state.mode = 'walk';
+  spawnKeeper();
+  togglePanel('map', false);
+});
+$('act-e').addEventListener('click', actE);
+$('act-f').addEventListener('click', actF);
+
+addEventListener('keydown', (e) => {
+  if (state.mode === 'intro') { if (e.code === 'Enter' || e.code === 'Space') { e.preventDefault(); if (!$('start').disabled) start(); } return; }
+  if (['Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.code)) e.preventDefault();
+  keys.add(e.code);
+  if (e.repeat) return;
+  if (e.code === 'KeyE') actE();
+  else if (e.code === 'KeyF') actF();
+  else if (e.code === 'KeyV') setView(state.view === 'follow' ? 'explore' : 'follow');
+  else if (e.code === 'KeyM') togglePanel('map');
+  else if (e.code === 'Escape') togglePanel(null, false);
+});
+addEventListener('keyup', (e) => keys.delete(e.code));
+addEventListener('blur', () => keys.clear());
+
+const ray = new THREE.Raycaster(), ndc = new THREE.Vector2();
+function pickGround(cx, cy) {
+  ndc.set((cx / innerWidth) * 2 - 1, -(cy / innerHeight) * 2 + 1);
+  ray.setFromCamera(ndc, camera);
+  const o = ray.ray.origin, d = ray.ray.direction;
+  for (let t = 0.5; t < 400; t += 0.5) {
+    const x = o.x + d.x * t, y = o.y + d.y * t, z = o.z + d.z * t;
+    if (y <= Math.max(sampleH(x, z), WATER_LEVEL)) return new THREE.Vector3(x, y, z);
+  }
+  return null;
+}
+canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+canvas.addEventListener('pointerdown', (e) => {
+  if (state.mode === 'intro' || state.view === 'explore') return;
+  canvas.setPointerCapture(e.pointerId);
+  if (e.button === 2) { hold.orbit = true; hold.sx = e.clientX; hold.sy = e.clientY; return; }
+  hold.active = true; hold.target = pickGround(e.clientX, e.clientY);
+});
+canvas.addEventListener('pointermove', (e) => {
+  if (hold.orbit) {
+    cam.yaw -= (e.clientX - hold.sx) * 0.005;
+    cam.pitch = clamp(cam.pitch + (e.clientY - hold.sy) * 0.004, 0.05, 1.2);
+    hold.sx = e.clientX; hold.sy = e.clientY; cam.userT = state.time;
+  } else if (hold.active) hold.target = pickGround(e.clientX, e.clientY) ?? hold.target;
+});
+const endHold = () => { hold.active = hold.orbit = false; hold.target = null; };
+canvas.addEventListener('pointerup', endHold);
+canvas.addEventListener('pointercancel', endHold);
+canvas.addEventListener('wheel', (e) => {
+  if (state.view !== 'follow') return;
+  e.preventDefault();
+  cam.dist = clamp(cam.dist * Math.exp(e.deltaY * 0.001), 4, 30);
+}, { passive: false });
+
+// ==== FRAME ===================================================================
+let fpsAcc = 0, fpsN = 0;
+function step(dt) {
+  state.time += dt;
+  timeU.value = state.time;
+  for (const w of wakes) { w.z += dt; if (w.z > 4) w.w = 0; }
+  mill.wheel.rotation.z -= dt * 0.7;
+  if ((mill.splashT = (mill.splashT ?? 0) - dt) < 0) { mill.splashT = 0.7; emitWake(WHEEL.x, WHEEL.z, 0.55); }
+  if (state.mode === 'walk') updateKeeper(dt);
+  updateBoat(dt);
+  updateFishing(dt);
+  updateCamera(dt);
+  sky.position.copy(camera.position);
+  if (state.mode !== 'intro') {
+    updatePlace(focusPoint(tmpFocus));
+    updatePrompts();
+    $('needle').style.transform = `rotate(${(camYaw() * 180) / Math.PI}deg)`;
+    if (!$('map-panel').classList.contains('hidden-ui')) drawMap();
+  }
+  audio.update(dt, state.mode === 'boat' ? 0.25 + Math.min(Math.abs(boat.speed) / 7, 1) : 0);
+  renderer.render(scene, camera);
+  if (PARAMS.debug) {
+    fpsAcc += dt; fpsN++;
+    if (fpsAcc > 0.5) { $('fps').hidden = false; $('fps').textContent = `${Math.round(fpsN / fpsAcc)} fps`; fpsAcc = fpsN = 0; }
+  }
+}
+const timer = new THREE.Timer();
+function loop(t) { timer.update(t); step(Math.min(timer.getDelta(), 0.05)); requestAnimationFrame(loop); }
+
+window.__app = { step, start, state, keys, keeper, boat, fish, cam, camera, scene, renderer, sampleH, boatBlocked, actE, actF, setView };
+$('start').disabled = false;
+$('start').textContent = 'Begin';
+$('status').textContent = 'Sound is optional · press ? for controls';
+if (PARAMS.test) step(1 / 60);
+else loop();
+</script>
+</body>
+</html>
